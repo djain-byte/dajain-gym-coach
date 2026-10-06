@@ -6,3 +6,6 @@ __pycache__/
 food_images/*.jpg
 workout_media/*.mp4
 workout_media/*.jpg
+backups/
+*.tmp
+*.bak

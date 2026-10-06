@@ -20,13 +20,24 @@ import time
 import json
 import threading
 import subprocess
-from datetime import datetime
+import shutil
+import warnings
+warnings.filterwarnings("ignore")
+from datetime import datetime, timezone, timedelta
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
+
+# Timezone standard: Indian Standard Time (UTC+5:30)
+IST = timezone(timedelta(hours=5, minutes=30))
+
+def now_ist():
+    """Returns the current datetime localized strictly to Indian Standard Time."""
+    return datetime.now(IST)
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 FOOD_IMAGES_DIR = os.path.join(BASE_DIR, "food_images")
 WORKOUT_MEDIA_DIR = os.path.join(BASE_DIR, "workout_media")
+BACKUPS_DIR = os.path.join(BASE_DIR, "backups")
 PROFILE_PATH = os.path.join(BASE_DIR, "profile.json")
 LOGS_PATH = os.path.join(BASE_DIR, "daily_logs.json")
 PRS_PATH = os.path.join(BASE_DIR, "exercise_prs.json")
@@ -36,8 +47,19 @@ ENV_PATH = os.path.join(BASE_DIR, ".env")
 
 os.makedirs(FOOD_IMAGES_DIR, exist_ok=True)
 os.makedirs(WORKOUT_MEDIA_DIR, exist_ok=True)
+os.makedirs(BACKUPS_DIR, exist_ok=True)
 
-TESSERACT_BIN = "/opt/homebrew/bin/tesseract" if os.path.exists("/opt/homebrew/bin/tesseract") else "tesseract"
+# Central file lock for atomic multi-threaded read/write safety
+FILE_LOCK = threading.RLock()
+
+def find_tesseract():
+    """Dynamically resolves Tesseract OCR binary across common macOS and Linux paths."""
+    for p in ["/opt/homebrew/bin/tesseract", "/usr/local/bin/tesseract", "/usr/bin/tesseract"]:
+        if os.path.exists(p):
+            return p
+    return shutil.which("tesseract") or "tesseract"
+
+TESSERACT_BIN = find_tesseract()
 
 # ----------------- HTTP Health Server (For Free Render Hosting) -----------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
@@ -58,6 +80,20 @@ def start_health_server():
         server.serve_forever()
     except Exception as e:
         print(f"Health server note: {e}")
+
+def start_keepalive_pinger():
+    """Keeps cloud container awake by pinging its health endpoint every 10 minutes if RENDER_EXTERNAL_URL is set."""
+    env = load_env()
+    ext_url = env.get("RENDER_EXTERNAL_URL") or os.environ.get("RENDER_EXTERNAL_URL")
+    if not ext_url:
+        return
+    print(f"🔄 Cloud Keepalive Pinger active for: {ext_url}")
+    while True:
+        try:
+            time.sleep(600)
+            requests.get(ext_url, timeout=10)
+        except Exception:
+            pass
 
 # ----------------- Workout Schedule -----------------
 WORKOUT_SCHEDULE = {
@@ -151,99 +187,124 @@ WORKOUT_SCHEDULE = {
     }
 }
 
-# ----------------- Persistence Helpers -----------------
+# ----------------- Persistence Helpers & Atomic File I/O -----------------
 def load_env():
     env = {}
     if os.path.exists(ENV_PATH):
-        with open(ENV_PATH, "r") as f:
+        with open(ENV_PATH, "r", encoding="utf-8") as f:
             for line in f:
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
                     env[k.strip()] = v.strip().strip("'\"")
-    for k in ["TELEGRAM_BOT_TOKEN", "PORT"]:
+    for k in ["TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID", "TIMEZONE", "PORT", "RENDER_EXTERNAL_URL"]:
         if k in os.environ:
             env[k] = os.environ[k]
     return env
 
+def _atomic_json_dump(filepath, data, make_backup=False):
+    """Writes data atomically to prevent corruption, with optional daily rolling backup."""
+    tmp_path = f"{filepath}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp_path, filepath)
+
+    if make_backup:
+        try:
+            today_str = now_ist().strftime("%Y%m%d")
+            base_name = os.path.basename(filepath)
+            backup_file = os.path.join(BACKUPS_DIR, f"{base_name}.{today_str}.bak")
+            if not os.path.exists(backup_file):
+                shutil.copy2(filepath, backup_file)
+        except Exception as e:
+            print(f"Backup notice: {e}")
+
 def load_profile():
-    if os.path.exists(PROFILE_PATH):
-        with open(PROFILE_PATH, "r") as f:
-            return json.load(f)
-    return {
-        "targets": {
-            "daily_calories": 2050,
-            "protein_g": 145,
-            "carbohydrates_g": 210,
-            "fats_g": 52,
-            "water_liters": 3.5,
-            "daily_steps": 9000
+    with FILE_LOCK:
+        if os.path.exists(PROFILE_PATH):
+            with open(PROFILE_PATH, "r", encoding="utf-8") as f:
+                return json.load(f)
+        return {
+            "targets": {
+                "daily_calories": 2050,
+                "protein_g": 145,
+                "carbohydrates_g": 210,
+                "fats_g": 52,
+                "water_liters": 3.5,
+                "daily_steps": 9000
+            },
+            "telegram_chat_id": 8650465749
         }
-    }
 
 def save_profile(profile):
-    with open(PROFILE_PATH, "w") as f:
-        json.dump(profile, f, indent=2)
+    with FILE_LOCK:
+        _atomic_json_dump(PROFILE_PATH, profile)
 
 def load_logs():
-    if os.path.exists(LOGS_PATH):
-        with open(LOGS_PATH, "r") as f:
-            try:
-                return json.load(f)
-            except Exception:
-                return {}
-    return {}
+    with FILE_LOCK:
+        if os.path.exists(LOGS_PATH):
+            with open(LOGS_PATH, "r", encoding="utf-8") as f:
+                try:
+                    return json.load(f)
+                except Exception:
+                    return {}
+        return {}
 
 def save_logs(logs):
-    with open(LOGS_PATH, "w") as f:
-        json.dump(logs, f, indent=2)
+    with FILE_LOCK:
+        _atomic_json_dump(LOGS_PATH, logs, make_backup=True)
 
 def load_prs():
-    if os.path.exists(PRS_PATH):
-        with open(PRS_PATH, "r") as f:
-            try:
-                return json.load(f)
-            except Exception:
-                return {}
-    return {}
+    with FILE_LOCK:
+        if os.path.exists(PRS_PATH):
+            with open(PRS_PATH, "r", encoding="utf-8") as f:
+                try:
+                    return json.load(f)
+                except Exception:
+                    return {}
+        return {}
 
 def save_prs(prs):
-    with open(PRS_PATH, "w") as f:
-        json.dump(prs, f, indent=2)
+    with FILE_LOCK:
+        _atomic_json_dump(PRS_PATH, prs)
 
 def load_memory():
-    if os.path.exists(MEMORY_PATH):
-        with open(MEMORY_PATH, "r") as f:
-            try:
-                return json.load(f)
-            except Exception:
-                return {}
-    return {
-        "user_name": "Dajain",
-        "streaks": {"clean_diet_days": 1, "workout_adherence_days": 1, "water_target_days": 0, "zero_sweets_days": 1},
-        "behavioral_patterns": [],
-        "timeline_learnings": []
-    }
+    with FILE_LOCK:
+        if os.path.exists(MEMORY_PATH):
+            with open(MEMORY_PATH, "r", encoding="utf-8") as f:
+                try:
+                    return json.load(f)
+                except Exception:
+                    return {}
+        return {
+            "user_name": "Dajain",
+            "streaks": {"clean_diet_days": 1, "workout_adherence_days": 1, "water_target_days": 0, "zero_sweets_days": 1},
+            "behavioral_patterns": [],
+            "timeline_learnings": []
+        }
 
 def save_memory(mem):
-    with open(MEMORY_PATH, "w") as f:
-        json.dump(mem, f, indent=2)
+    with FILE_LOCK:
+        _atomic_json_dump(MEMORY_PATH, mem, make_backup=True)
 
 def load_products():
-    if os.path.exists(PRODUCTS_PATH):
-        with open(PRODUCTS_PATH, "r") as f:
-            try:
-                return json.load(f)
-            except Exception:
-                return {}
-    return {}
+    with FILE_LOCK:
+        if os.path.exists(PRODUCTS_PATH):
+            with open(PRODUCTS_PATH, "r", encoding="utf-8") as f:
+                try:
+                    return json.load(f)
+                except Exception:
+                    return {}
+        return {}
 
 def save_products(prods):
-    with open(PRODUCTS_PATH, "w") as f:
-        json.dump(prods, f, indent=2)
+    with FILE_LOCK:
+        _atomic_json_dump(PRODUCTS_PATH, prods, make_backup=True)
 
 def get_today_entry(logs):
-    today = datetime.now().strftime("%Y-%m-%d")
+    today = now_ist().strftime("%Y-%m-%d")
     if today not in logs:
         logs[today] = {
             "date": today,
@@ -268,14 +329,19 @@ def get_today_entry(logs):
 
 # ----------------- OCR & Continuous Learning Engine -----------------
 def run_ocr(image_path):
+    if not os.path.exists(image_path):
+        return ""
+    if not shutil.which(TESSERACT_BIN) and not os.path.exists(TESSERACT_BIN):
+        print(f"⚠️ Tesseract binary not found at '{TESSERACT_BIN}'. Skipping native OCR.")
+        return ""
     try:
-        res1 = subprocess.run([TESSERACT_BIN, image_path, "stdout"], capture_output=True, timeout=10)
+        res1 = subprocess.run([TESSERACT_BIN, image_path, "stdout"], capture_output=True, timeout=12)
         txt1 = res1.stdout.decode('utf-8', errors='ignore') if isinstance(res1.stdout, bytes) else str(res1.stdout)
         
-        res2 = subprocess.run([TESSERACT_BIN, image_path, "stdout", "--psm", "6"], capture_output=True, timeout=10)
+        res2 = subprocess.run([TESSERACT_BIN, image_path, "stdout", "--psm", "6"], capture_output=True, timeout=12)
         txt2 = res2.stdout.decode('utf-8', errors='ignore') if isinstance(res2.stdout, bytes) else str(res2.stdout)
         
-        return txt1 + "\n" + txt2
+        return (txt1 + "\n" + txt2).strip()
     except Exception as e:
         print(f"OCR Error: {e}")
         return ""
@@ -603,7 +669,7 @@ def analyze_behavior_and_habits(text, meal_data=None):
     if found_sweet:
         mem["streaks"]["zero_sweets_days"] = 0
         mem["timeline_learnings"].append({
-            "timestamp": datetime.now().isoformat(),
+            "timestamp": now_ist().isoformat(),
             "type": "slip_sugar",
             "learning": f"Sweet/sugar detected in meal: '{text[:40]}'. Reminded that sugar triggers love-handle fat storage."
         })
@@ -611,7 +677,7 @@ def analyze_behavior_and_habits(text, meal_data=None):
     else:
         mem["streaks"]["zero_sweets_days"] = mem["streaks"].get("zero_sweets_days", 0) + 1
 
-    if "peanut butter" in text_lower and datetime.now().hour < 9:
+    if "peanut butter" in text_lower and now_ist().hour < 9:
         feedback_notes.append("⚠️ *Memory Reminder:* You ate Peanut Butter in the morning window. Remember our rule: PB is 70% fat and blunts your gym pumps. Move it to 4:30 PM snack!")
 
     if meal_data and meal_data.get("protein_g", 0) >= 30:
@@ -716,7 +782,7 @@ def format_evening_review(entry, targets, mem):
 
 # ----------------- Main Bot Class -----------------
 class TelegramBot:
-    def __init__(self, token):
+    def __init__(self, token, authorized_chat_id=None):
         self.token = token
         self.base_url = f"https://api.telegram.org/bot{token}"
         self.offset = 0
@@ -725,6 +791,15 @@ class TelegramBot:
         self.media_groups = {}
         self.last_scanned = {}
         self.group_lock = threading.Lock()
+
+        # Hardened Authorization Lock: Protects Darshan's private logs from hijack
+        env = load_env()
+        profile = load_profile()
+        auth_raw = authorized_chat_id or env.get("TELEGRAM_CHAT_ID") or profile.get("telegram_chat_id") or 8650465749
+        try:
+            self.authorized_chat_id = int(auth_raw)
+        except (ValueError, TypeError):
+            self.authorized_chat_id = 8650465749
 
     def send_message(self, chat_id, text, parse_mode="Markdown"):
         url = f"{self.base_url}/sendMessage"
@@ -735,7 +810,13 @@ class TelegramBot:
         }
         try:
             r = requests.post(url, json=payload, timeout=10)
-            return r.json()
+            res_json = r.json()
+            if not res_json.get("ok") and parse_mode:
+                # If markdown entity parsing fails (e.g. unescaped character), fallback instantly to plain text
+                payload.pop("parse_mode", None)
+                r2 = requests.post(url, json=payload, timeout=10)
+                return r2.json()
+            return res_json
         except Exception as e:
             print(f"Error sending message: {e}")
             return None
@@ -753,13 +834,12 @@ class TelegramBot:
         return False
 
     def schedule_checker(self):
-        print("⏰ Proactive scheduler thread active (6:30 AM & 9:30 PM)...")
+        print("⏰ Proactive scheduler thread active (6:30 AM & 9:30 PM IST)...")
         while True:
             try:
-                now = datetime.now()
+                now = now_ist()
                 today_str = now.strftime("%Y-%m-%d")
-                profile = load_profile()
-                chat_id = profile.get("telegram_chat_id")
+                chat_id = self.authorized_chat_id
 
                 if now.hour == 6 and now.minute in [30, 31]:
                     if self.last_morning_date != today_str and chat_id:
@@ -769,6 +849,7 @@ class TelegramBot:
 
                 if now.hour == 21 and now.minute in [30, 31]:
                     if self.last_evening_date != today_str and chat_id:
+                        profile = load_profile()
                         logs = load_logs()
                         entry, _ = get_today_entry(logs)
                         mem = load_memory()
@@ -787,6 +868,12 @@ class TelegramBot:
 
         messages = group_data["messages"]
         chat_id = messages[0]["chat"]["id"]
+
+        # Enforce security lock on media group processing
+        if self.authorized_chat_id and chat_id != self.authorized_chat_id:
+            print(f"⚠️ Blocked unauthorized media group from chat_id {chat_id}")
+            return
+
         caption = next((m.get("caption") for m in messages if m.get("caption")), "")
 
         print(f"📦 Processing Multi-Image Album ({len(messages)} photos) for chat {chat_id}...")
@@ -796,7 +883,7 @@ class TelegramBot:
             photos = m.get("photo", [])
             if photos:
                 best = photos[-1]
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                timestamp = now_ist().strftime("%Y%m%d_%H%M%S")
                 dest = os.path.join(FOOD_IMAGES_DIR, f"album_{group_id}_{i}_{timestamp}.jpg")
                 if self.download_file(best["file_id"], dest):
                     downloaded_paths.append(dest)
@@ -843,7 +930,7 @@ class TelegramBot:
                 return
 
             entry["meals"].append({
-                "time": datetime.now().strftime("%H:%M"),
+                "time": now_ist().strftime("%H:%M"),
                 "name": f"{clean_pname} ({nutrition_found['serving_size']})",
                 "image": os.path.basename(downloaded_paths[0]) if downloaded_paths else None,
                 "calories": nutrition_found["calories"],
@@ -921,7 +1008,7 @@ class TelegramBot:
                 return
 
             entry["meals"].append({
-                "time": datetime.now().strftime("%H:%M"),
+                "time": now_ist().strftime("%H:%M"),
                 "name": parsed["description"],
                 "image": os.path.basename(downloaded_paths[0]) if downloaded_paths else None,
                 "calories": parsed["calories"],
@@ -959,6 +1046,13 @@ class TelegramBot:
             return
 
         chat_id = message["chat"]["id"]
+
+        # Strict Security Lockdown: Prevent unauthorized users from viewing or hijacking profile
+        if self.authorized_chat_id and chat_id != self.authorized_chat_id:
+            print(f"⚠️ Blocked unauthorized access attempt from chat_id {chat_id}")
+            self.send_message(chat_id, "⛔ *Access Denied:* This is a private, dedicated 19.GYM AI Coach instance for Darshan Jain.")
+            return
+
         text = message.get("text", "").strip()
         caption = message.get("caption", "").strip()
         photos = message.get("photo")
@@ -979,8 +1073,8 @@ class TelegramBot:
             return
 
         profile = load_profile()
-        if profile.get("telegram_chat_id") != chat_id:
-            profile["telegram_chat_id"] = chat_id
+        if not profile.get("telegram_chat_id"):
+            profile["telegram_chat_id"] = self.authorized_chat_id
             save_profile(profile)
 
         targets = profile["targets"]
@@ -1097,7 +1191,7 @@ class TelegramBot:
                     entry["steps"] = val
                     save_logs(logs)
                     desk_warning = ""
-                    if val < 4000 and datetime.now().hour >= 15:
+                    if val < 4000 and now_ist().hour >= 15:
                         desk_warning = "\n⚠️ *Desk Job Trap:* It's past 3 PM and you're under 4,000 steps! Take a 10-minute standing walk between meetings."
                     self.send_message(chat_id, f"🚶‍♂️ Updated steps: `{entry['steps']}` / {targets['daily_steps']}{desk_warning}")
                     return
@@ -1119,7 +1213,7 @@ class TelegramBot:
         # Text-only message classification (No photo attached)
         if text and not photos and not video:
             intent = classify_intent(text)
-            print(f"[{datetime.now().strftime('%H:%M:%S')}] Text: '{text}' -> Intent: {intent}")
+            print(f"[{now_ist().strftime('%H:%M:%S')}] Text: '{text}' -> Intent: {intent}")
 
             if intent == "GREETING":
                 self.send_message(chat_id, "🔥 *Yes Darshan! I am 100% LIVE, active, and monitoring your fitness 24/7!* 🚀\n\nReady for your workout logs, meals, or any fitness questions. How can I assist you right now?")
@@ -1211,7 +1305,7 @@ class TelegramBot:
         # Handle Workout Media vs Food Media
         incoming_caption = caption or text
         is_workout = is_workout_message(incoming_caption, is_video=bool(video))
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = now_ist().strftime("%Y%m%d_%H%M%S")
 
         # 1. WORKOUT VIDEO / EXERCISE SET LOGGING
         if is_workout and (video or photos or ("kg" in incoming_caption.lower() or "reps" in incoming_caption.lower())):
@@ -1255,7 +1349,7 @@ class TelegramBot:
                 save_prs(prs)
 
             entry["workout_sets"].append({
-                "time": datetime.now().strftime("%H:%M"),
+                "time": now_ist().strftime("%H:%M"),
                 "exercise": ex_name,
                 "weight_kg": wt,
                 "reps": reps,
@@ -1344,7 +1438,7 @@ class TelegramBot:
             habit_feedback = analyze_behavior_and_habits(incoming_caption or parsed["description"], parsed)
 
             entry["meals"].append({
-                "time": datetime.now().strftime("%H:%M"),
+                "time": now_ist().strftime("%H:%M"),
                 "name": parsed["description"],
                 "image": os.path.basename(saved_img_path) if saved_img_path else None,
                 "calories": parsed["calories"],
@@ -1399,6 +1493,9 @@ class TelegramBot:
         t_http = threading.Thread(target=start_health_server, daemon=True)
         t_http.start()
 
+        t_keep = threading.Thread(target=start_keepalive_pinger, daemon=True)
+        t_keep.start()
+
         while True:
             try:
                 url = f"{self.base_url}/getUpdates?offset={self.offset}&timeout=20"
@@ -1416,12 +1513,13 @@ class TelegramBot:
 def main():
     env = load_env()
     token = env.get("TELEGRAM_BOT_TOKEN")
+    auth_id = env.get("TELEGRAM_CHAT_ID")
 
     if not token:
         print("\n⚠️  TELEGRAM_BOT_TOKEN IS MISSING in .env or environment!")
         sys.exit(1)
 
-    bot = TelegramBot(token)
+    bot = TelegramBot(token, authorized_chat_id=auth_id)
     bot.run()
 
 if __name__ == "__main__":
