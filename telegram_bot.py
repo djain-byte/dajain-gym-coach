@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """
 19.GYM Telegram Coach Bot & Continuous Learning Engine
+- Intelligent Intent Classifier: Distinguishes greetings ("Live?"), questions, searches, and actual meals.
+- Never logs conversational queries or questions as food!
 - Multi-Image Album Support (media_group_id buffering for front/back product scans and multi-plate meals).
 - Nutrition Label OCR Scanner (reads Protein, Carbs, Fats, Calories from package back labels).
 - Live Internet Food Search (OpenFoodFacts API integration) for continuous product learning.
@@ -260,11 +262,12 @@ def get_today_entry(logs):
         }
     if "workout_sets" not in logs[today]:
         logs[today]["workout_sets"] = []
+    if "meals" not in logs[today]:
+        logs[today]["meals"] = []
     return logs[today], today
 
 # ----------------- OCR & Continuous Learning Engine -----------------
 def run_ocr(image_path):
-    """Extracts text from image using tesseract"""
     try:
         res = subprocess.run([TESSERACT_BIN, image_path, "stdout"], capture_output=True, text=True, timeout=10)
         return res.stdout
@@ -273,7 +276,6 @@ def run_ocr(image_path):
         return ""
 
 def parse_nutrition_label(ocr_text):
-    """Detects and parses nutrition facts from back label OCR"""
     text = ocr_text.lower()
     is_nutrition_label = any(k in text for k in ["nutritional information", "nutrition facts", "per 100g", "per serve", "energy (kcal)", "protein (g)"])
     if not is_nutrition_label:
@@ -281,27 +283,22 @@ def parse_nutrition_label(ocr_text):
 
     data = {"calories": 0, "protein_g": 0.0, "carbs_g": 0.0, "fats_g": 0.0, "serving_size": "1 serving"}
 
-    # Extract Protein
     p_match = re.search(r"protein\s*(?:\(g\))?[\s:]*(\d+(?:\.\d+)?)", text)
     if p_match:
         data["protein_g"] = float(p_match.group(1))
 
-    # Extract Energy / Calories
     cal_match = re.search(r"(?:energy|calories)\s*(?:\(kcal\))?[\s:]*(\d+(?:\.\d+)?)", text)
     if cal_match:
         data["calories"] = round(float(cal_match.group(1)))
 
-    # Extract Fat
     f_match = re.search(r"(?:total fat|fat)\s*(?:\(g\))?[\s:]*(\d+(?:\.\d+)?)", text)
     if f_match:
         data["fats_g"] = float(f_match.group(1))
 
-    # Extract Carbs
     c_match = re.search(r"(?:total carbohydrates|carbohydrates|carbs)\s*(?:\(g\))?[\s:]*(\d+(?:\.\d+)?)", text)
     if c_match:
         data["carbs_g"] = float(c_match.group(1))
 
-    # Extract serving size
     serve_match = re.search(r"per\s*(\d+\s*(?:g|ml|scoop))", text)
     if serve_match:
         data["serving_size"] = serve_match.group(1)
@@ -309,7 +306,6 @@ def parse_nutrition_label(ocr_text):
     return data
 
 def search_openfoodfacts(query):
-    """Live internet search for food products and macros"""
     url = f"https://world.openfoodfacts.org/cgi/search.pl?search_terms={query}&search_simple=1&action=process&json=1"
     try:
         r = requests.get(url, headers={"User-Agent": "DJGymCoachBot/2.0"}, timeout=6).json()
@@ -335,7 +331,7 @@ def search_openfoodfacts(query):
         print(f"Internet search error: {e}")
     return None
 
-# ----------------- Macro Parsing -----------------
+# ----------------- Macro DB -----------------
 NUTRITION_DB = {
     "low fat paneer": {"unit": "100g", "cal": 150, "p": 25.0, "c": 3.0, "f": 4.0},
     "paneer": {"unit": "100g", "cal": 265, "p": 18.0, "c": 3.5, "f": 20.8},
@@ -356,6 +352,51 @@ NUTRITION_DB = {
     "walnuts": {"unit": "2 pcs", "cal": 65, "p": 1.5, "c": 1.4, "f": 6.5},
 }
 
+def classify_intent(text):
+    """Accurately classifies message intent so pings, status checks, questions, and conversational chat are NEVER logged as meals"""
+    t = text.strip().lower()
+    clean_t = re.sub(r"[?!.,]", "", t).strip()
+    
+    # 1. Pings / Greetings / Status checks (e.g. "Live?", "Are you live?", "Hi", "Ping")
+    live_keywords = [
+        "live", "alive", "online", "working", "active", "running", "ping", "pong", "test",
+        "hi", "hello", "hey", "sup", "yo", "namaste", "pranam", "gm", "ge",
+        "good morning", "good evening", "good afternoon"
+    ]
+    if clean_t in live_keywords or any(t.startswith(k + " ") for k in ["hi", "hello", "hey"]):
+        return "GREETING"
+    if any(phrase in t for phrase in ["are you live", "is bot live", "are you online", "are you active", "are you working", "you live", "bot live", "are you there", "u there", "u live"]):
+        return "GREETING"
+
+    # 2. Informational search command (e.g. "Search oats", "Calories in paneer")
+    search_prefixes = ["search ", "find ", "check ", "calories in ", "macros of ", "nutrition of ", "nutrition facts of "]
+    if any(t.startswith(p) for p in search_prefixes):
+        return "SEARCH"
+
+    # 3. Status queries (e.g. "status", "how am i doing", "summary", "report", "today")
+    if clean_t in ["status", "summary", "my status", "report", "today", "progress"]:
+        return "STATUS"
+
+    # 4. Workout indicators (sets, reps, exercises)
+    if is_workout_message(t):
+        return "WORKOUT"
+
+    # 5. Questions / Advice queries (e.g. "Can I eat this?", "Is low fat paneer good?", "How much protein in soya?")
+    question_triggers = ["?", "can i", "is it", "should i", "what about", "is this", "how much", "tell me", "why", "when", "does", "would you recommend"]
+    if any(q in t for q in question_triggers):
+        if not any(v in t for v in ["i ate", "ate", "had", "consumed"]):
+            return "QUESTION"
+
+    # 6. Food Intake Logging (explicit meal verbs or known food names)
+    meal_verbs = ["ate", "eating", "had", "drank", "lunch", "dinner", "breakfast", "snack", "meal", "consumed", "logged", "post workout meal"]
+    has_meal_verb = any(v in t for v in meal_verbs)
+    has_known_food = any(k in t for k in NUTRITION_DB.keys()) or any(k in t for k in load_products().keys())
+    
+    if has_meal_verb or has_known_food:
+        return "MEAL"
+
+    return "CONVERSATION"
+
 def parse_meal_text(text):
     text_lower = text.lower()
     total_cal = 0
@@ -364,7 +405,7 @@ def parse_meal_text(text):
     total_f = 0.0
     found_items = []
 
-    # Check in learned_products.json first!
+    # Check learned products first
     learned = load_products()
     for prod_name, pdata in learned.items():
         if prod_name in text_lower or (pdata.get("brand", "").lower() in text_lower and any(w in text_lower for w in prod_name.split())):
@@ -388,7 +429,7 @@ def parse_meal_text(text):
         total_c += item["c"] * ratio
         total_f += item["f"] * ratio
         found_items.append(f"{qty:.0f}g {key.title()}")
-    elif "low fat paneer" in text_lower:
+    elif "low fat paneer" in text_lower and not any("paneer" in f.lower() for f in found_items):
         item = NUTRITION_DB["low fat paneer"]
         total_cal += item["cal"] * 1.5
         total_p += item["p"] * 1.5
@@ -421,6 +462,43 @@ def parse_meal_text(text):
         total_f += item["f"] * 2
         found_items.append("2 Rotis")
 
+    # Check for soya chunks
+    soya_match = re.search(r"(\d+)\s*(?:g|gms|gram|grams)?\s*(?:soya\s*chunks|soya)", text_lower)
+    if soya_match:
+        qty = float(soya_match.group(1))
+        item = NUTRITION_DB["soya chunks"]
+        ratio = qty / 50.0
+        total_cal += item["cal"] * ratio
+        total_p += item["p"] * ratio
+        total_c += item["c"] * ratio
+        total_f += item["f"] * ratio
+        found_items.append(f"{qty:.0f}g Soya Chunks")
+    elif any(w in text_lower for w in ["soya chunks", "soya chunk", "soya"]):
+        item = NUTRITION_DB["soya chunks"]
+        total_cal += item["cal"]
+        total_p += item["p"]
+        total_c += item["c"]
+        total_f += item["f"]
+        found_items.append("50g Soya Chunks")
+
+    # Check for chilla
+    chilla_match = re.search(r"(\d+)\s*(?:chilla|chillas|cheela|cheelas|moong dal chilla)", text_lower)
+    if chilla_match:
+        count = float(chilla_match.group(1))
+        item = NUTRITION_DB["chilla"]
+        total_cal += item["cal"] * count
+        total_p += item["p"] * count
+        total_c += item["c"] * count
+        total_f += item["f"] * count
+        found_items.append(f"{int(count)} Chillas")
+    elif any(w in text_lower for w in ["chilla", "cheela"]):
+        item = NUTRITION_DB["chilla"]
+        total_cal += item["cal"] * 2
+        total_p += item["p"] * 2
+        total_c += item["c"] * 2
+        total_f += item["f"] * 2
+        found_items.append("2 Chillas")
+
     if "dal" in text_lower:
         item = NUTRITION_DB["dal"]
         total_cal += item["cal"]
@@ -445,6 +523,30 @@ def parse_meal_text(text):
         total_f += item["f"]
         found_items.append("Salad")
 
+    if any(w in text_lower for w in ["curd", "dahi"]):
+        item = NUTRITION_DB["curd"]
+        total_cal += item["cal"]
+        total_p += item["p"]
+        total_c += item["c"]
+        total_f += item["f"]
+        found_items.append("100g Curd")
+
+    if "rice" in text_lower:
+        item = NUTRITION_DB["rice"]
+        total_cal += item["cal"]
+        total_p += item["p"]
+        total_c += item["c"]
+        total_f += item["f"]
+        found_items.append("1 Cup Rice")
+
+    if "oats" in text_lower:
+        item = NUTRITION_DB["oats"]
+        total_cal += item["cal"]
+        total_p += item["p"]
+        total_c += item["c"]
+        total_f += item["f"]
+        found_items.append("50g Oats")
+
     if any(w in text_lower for w in ["whey", "protein shake", "gold standard"]) and not any("whey" in f.lower() for f in found_items):
         item = NUTRITION_DB["whey"]
         total_cal += item["cal"]
@@ -454,25 +556,31 @@ def parse_meal_text(text):
         found_items.append("1 Scoop Whey Protein")
 
     if not found_items:
-        # Check internet search
-        online = search_openfoodfacts(text)
-        if online:
-            total_cal = online["calories"]
-            total_p = online["protein_g"]
-            total_c = online["carbs_g"]
-            total_f = online["fats_g"]
-            found_items.append(f"{online['name']} ({online.get('serving_size', '100g')})")
-            # Save into memory
-            learned[online["name"].lower()] = online
-            save_products(learned)
-        else:
-            total_cal = 450
-            total_p = 25.0
-            total_c = 50.0
-            total_f = 12.0
-            found_items.append(text[:30])
+        clean_query = re.sub(r"(?:i ate|ate|had|consumed|lunch:|dinner:|breakfast:|meal:)", "", text_lower).strip()
+        ignored_words = ["live", "hi", "hello", "ping", "test", "ok", "cool", "hey", "sup", "yes", "no", "thanks", "done"]
+        if len(clean_query) >= 3 and not any(clean_query == ig for ig in ignored_words):
+            online = search_openfoodfacts(clean_query)
+            if online:
+                total_cal = online["calories"]
+                total_p = online["protein_g"]
+                total_c = online["carbs_g"]
+                total_f = online["fats_g"]
+                found_items.append(f"{online['name']} ({online.get('serving_size', '100g')})")
+                learned[online["name"].lower()] = online
+                save_products(learned)
+
+    if not found_items:
+        return {
+            "found": False,
+            "description": text[:40],
+            "calories": 0,
+            "protein_g": 0.0,
+            "carbs_g": 0.0,
+            "fats_g": 0.0
+        }
 
     return {
+        "found": True,
         "description": ", ".join(found_items),
         "calories": round(total_cal),
         "protein_g": round(total_p, 1),
@@ -581,7 +689,7 @@ def format_workout_message(day_offset=0):
 
 def format_evening_review(entry, targets, mem):
     tot = entry["totals"]
-    p_pct = (tot["protein_g"] / targets["protein_g"]) * 100
+    p_pct = (tot["protein_g"] / targets["protein_g"]) * 100 if targets["protein_g"] else 0
     cal_diff = tot["calories"] - targets["daily_calories"]
 
     verdict = "🔥 EXCELLENT EXECUTION" if p_pct >= 90 and abs(cal_diff) <= 150 else "⚠️ NEEDS COURSE CORRECTION"
@@ -601,7 +709,7 @@ def format_evening_review(entry, targets, mem):
     )
     return review_msg
 
-# ----------------- Telegram Bot Class with Media Group Buffering -----------------
+# ----------------- Main Bot Class -----------------
 class TelegramBot:
     def __init__(self, token):
         self.token = token
@@ -609,7 +717,7 @@ class TelegramBot:
         self.offset = 0
         self.last_morning_date = None
         self.last_evening_date = None
-        self.media_groups = {}  # group_id -> {"timer": ..., "messages": [...]}
+        self.media_groups = {}
         self.group_lock = threading.Lock()
 
     def send_message(self, chat_id, text, parse_mode="Markdown"):
@@ -666,7 +774,6 @@ class TelegramBot:
             time.sleep(30)
 
     def process_media_group(self, group_id):
-        """Processes buffered multi-image albums (front + back product scan)"""
         with self.group_lock:
             group_data = self.media_groups.pop(group_id, None)
         if not group_data:
@@ -688,7 +795,6 @@ class TelegramBot:
                 if self.download_file(best["file_id"], dest):
                     downloaded_paths.append(dest)
 
-        # Run OCR on all images to detect nutrition label and product details
         ocr_texts = [run_ocr(p) for p in downloaded_paths]
         nutrition_found = None
         for txt in ocr_texts:
@@ -704,10 +810,9 @@ class TelegramBot:
         learned = load_products()
 
         if nutrition_found:
-            # Successfully read nutrition label!
-            product_name = caption if caption else "Scanned Protein/Fitness Product"
-            learned[product_name.lower()] = {
-                "name": product_name,
+            clean_pname = re.sub(r"(?:can i eat|is it good|is this good|\?)", "", caption, flags=re.I).strip() or "Scanned Product"
+            learned[clean_pname.lower()] = {
+                "name": clean_pname,
                 "serving_size": nutrition_found["serving_size"],
                 "calories": nutrition_found["calories"],
                 "protein_g": nutrition_found["protein_g"],
@@ -717,10 +822,22 @@ class TelegramBot:
             }
             save_products(learned)
 
-            # Log 1 single serving!
+            if caption and classify_intent(caption) == "QUESTION":
+                feedback = (
+                    f"🧠 *Product Analyzed & Saved to Memory!* (📸 {len(downloaded_paths)} Photos)\n\n"
+                    f"📦 *Product:* {clean_pname}\n"
+                    f"📋 *Extracted Facts ({nutrition_found['serving_size']}):*\n"
+                    f"• Calories: `{nutrition_found['calories']} kcal`\n"
+                    f"• Protein: `{nutrition_found['protein_g']}g`\n"
+                    f"• Carbs: `{nutrition_found['carbs_g']}g` | Fats: `{nutrition_found['fats_g']}g`\n\n"
+                    f"💡 *Coach Verdict:* Fits your Jain lean recomposition plan. If you eat this, text *'I ate {clean_pname}'* to log it!"
+                )
+                self.send_message(chat_id, feedback)
+                return
+
             entry["meals"].append({
                 "time": datetime.now().strftime("%H:%M"),
-                "name": f"{product_name} ({nutrition_found['serving_size']})",
+                "name": f"{clean_pname} ({nutrition_found['serving_size']})",
                 "image": os.path.basename(downloaded_paths[0]) if downloaded_paths else None,
                 "calories": nutrition_found["calories"],
                 "protein_g": nutrition_found["protein_g"],
@@ -740,7 +857,7 @@ class TelegramBot:
 
             feedback = (
                 f"🧠 *New Product Learned & Logged as 1 Item!* (📸 {len(downloaded_paths)} Photos Analyzed)\n\n"
-                f"📦 *Product:* {product_name}\n"
+                f"📦 *Product:* {clean_pname}\n"
                 f"📋 *Extracted Label Facts ({nutrition_found['serving_size']}):*\n"
                 f"• Calories: `{nutrition_found['calories']} kcal`\n"
                 f"• Protein: `{nutrition_found['protein_g']}g`\n"
@@ -754,9 +871,27 @@ class TelegramBot:
             )
             self.send_message(chat_id, feedback)
         else:
-            # Multi-dish meal photos (e.g. plate + salad + bowl)
             meal_input = caption or "Combined Meal Plates"
             parsed = parse_meal_text(meal_input)
+            if caption and classify_intent(caption) == "QUESTION":
+                feedback = (
+                    f"🤔 *Coach Advice on Scanned Meal:*\n\n"
+                    f"🍽 *Items:* {parsed['description']}\n"
+                    f"• Calories: `{parsed['calories']} kcal`\n"
+                    f"• Protein: `{parsed['protein_g']}g`\n"
+                    f"• Carbs: `{parsed['carbs_g']}g` | Fats: `{parsed['fats_g']}g`\n\n"
+                    f"💡 Fits your Jain lean recomposition plan! Text *'Logged'* if you eat this."
+                )
+                self.send_message(chat_id, feedback)
+                return
+
+            if not parsed.get("found", True):
+                self.send_message(chat_id, (
+                    f"📸 Analyzed {len(downloaded_paths)} photos, but could not detect nutrition facts or specific foods.\n\n"
+                    f"To log, please text what you had (e.g. *'150g low fat paneer, 2 rotis'*)!"
+                ))
+                return
+
             entry["meals"].append({
                 "time": datetime.now().strftime("%H:%M"),
                 "name": parsed["description"],
@@ -796,8 +931,8 @@ class TelegramBot:
             return
 
         chat_id = message["chat"]["id"]
-        text = message.get("text", "")
-        caption = message.get("caption", "")
+        text = message.get("text", "").strip()
+        caption = message.get("caption", "").strip()
         photos = message.get("photo")
         video = message.get("video") or message.get("video_note")
         media_group_id = message.get("media_group_id")
@@ -953,6 +1088,57 @@ class TelegramBot:
                 except ValueError:
                     pass
 
+        # Text-only message classification (No photo attached)
+        if text and not photos and not video:
+            intent = classify_intent(text)
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] Text: '{text}' -> Intent: {intent}")
+
+            if intent == "GREETING":
+                self.send_message(chat_id, "🔥 *Yes Darshan! I am 100% LIVE, active, and monitoring your fitness 24/7!* 🚀\n\nReady for your workout logs, meals, or any fitness questions. How can I assist you right now?")
+                return
+
+            if intent == "STATUS":
+                tot = entry["totals"]
+                rem_p = max(0, targets["protein_g"] - tot["protein_g"])
+                rem_cal = max(0, targets["daily_calories"] - tot["calories"])
+                sets_count = len(entry.get("workout_sets", []))
+                stat_msg = (
+                    f"📊 *Today's Fitness Log ({today})*\n\n"
+                    f"🔥 *Calories:* `{tot['calories']} / {targets['daily_calories']} kcal` (Left: `{rem_cal} kcal`)\n"
+                    f"💪 *Protein:* `{tot['protein_g']}g / {targets['protein_g']}g` (Left: `{rem_p:.1f}g`)\n"
+                    f"🍞 *Carbs:* `{tot['carbs_g']}g / {targets['carbohydrates_g']}g`\n"
+                    f"🥑 *Fats:* `{tot['fats_g']}g / {targets['fats_g']}g`\n\n"
+                    f"🏋️ *Workout Sets Logged:* `{sets_count} sets recorded`\n"
+                    f"🚶‍♂️ *Steps:* `{entry['steps']} / {targets['daily_steps']}`\n"
+                    f"💧 *Water:* `{entry['water_l']}L / {targets['water_liters']}L`\n\n"
+                    f"*Meals Today:*\n" + ("\n".join([f"• {m['name']} (~{m['protein_g']}g P, {m['calories']} kcal)" for m in entry["meals"]]) if entry["meals"] else "No meals logged yet.")
+                )
+                self.send_message(chat_id, stat_msg)
+                return
+
+            if intent == "QUESTION":
+                # Check if it's asking about a specific food
+                food_query = re.sub(r"(?:can i eat|is it good to eat|is|good\?|\?)", "", text, flags=re.I).strip()
+                if food_query and (any(k in food_query.lower() for k in NUTRITION_DB.keys()) or any(k in food_query.lower() for k in load_products().keys())):
+                    parsed = parse_meal_text(food_query)
+                    self.send_message(chat_id, f"🤔 *Coach Verdict on '{food_query}':*\n\n• Calories: `{parsed['calories']} kcal`\n• Protein: `{parsed['protein_g']}g`\n• Carbs: `{parsed['carbs_g']}g` | Fats: `{parsed['fats_g']}g`\n\n💡 Fits your Jain recomposition plan as long as cooking oil is minimal. If you actually eat this, text: *'I ate {food_query}'* to log it!")
+                else:
+                    self.send_message(chat_id, f"🤔 *Coach Advisory:*\n\nTo give you an exact verdict on whether it fits your 145g protein & 2,050 kcal plan:\n📸 Send a picture of the plate/packaging, or tell me the exact food name!")
+                return
+
+            if intent == "SEARCH":
+                query = re.sub(r"(?:search|calories in|macros of|nutrition of)", "", text, flags=re.I).strip()
+                online = search_openfoodfacts(query)
+                if online:
+                    self.send_message(chat_id, f"🔍 *Nutrition Facts for {online['name']}:*\n\nBrand: {online.get('brand', 'Standard')}\nServing: {online.get('serving_size', '100g')}\n• Calories: `{online['calories']} kcal`\n• Protein: `{online['protein_g']}g`\n• Carbs: `{online['carbs_g']}g`\n• Fats: `{online['fats_g']}g`\n\n📌 *Note:* This was just an informational lookup and is NOT added to your daily intake.")
+                else:
+                    self.send_message(chat_id, f"🔍 Could not find product '{query}' online. Send a photo of the nutrition label and I will scan it directly!")
+                return
+
+            if intent == "CONVERSATION":
+                self.send_message(chat_id, "💪 I hear you, Darshan! If you just ate, please mention what you had (e.g., *'Lunch: 150g low fat paneer, 2 rotis'*). Otherwise, ask me any training or nutrition question!")
+                return
+
         # Handle Workout Media vs Food Media
         incoming_caption = caption or text
         is_workout = is_workout_message(incoming_caption, is_video=bool(video))
@@ -1021,7 +1207,7 @@ class TelegramBot:
             self.send_message(chat_id, reply_msg)
             return
 
-        # 2. FOOD MEAL LOGGING & HABIT CRITIQUE (Single Photo or Text)
+        # 2. ACTUAL FOOD MEAL LOGGING (With Photo or explicit meal intake)
         saved_img_path = None
         if photos:
             best_photo = photos[-1]
@@ -1032,15 +1218,19 @@ class TelegramBot:
                 saved_img_path = dest
 
         if incoming_caption or photos:
-            # Check if this single photo is a nutrition facts label
+            is_question = False
+            if incoming_caption:
+                if classify_intent(incoming_caption) == "QUESTION":
+                    is_question = True
+
             if saved_img_path:
                 ocr_text = run_ocr(saved_img_path)
                 label_data = parse_nutrition_label(ocr_text)
                 if label_data and label_data.get("protein_g", 0) > 0:
-                    prod_name = incoming_caption or "Product Label"
+                    clean_pname = re.sub(r"(?:can i eat|is it good|is this good|\?)", "", incoming_caption or "Product Label", flags=re.I).strip() or "Scanned Product"
                     learned = load_products()
-                    learned[prod_name.lower()] = {
-                        "name": prod_name,
+                    learned[clean_pname.lower()] = {
+                        "name": clean_pname,
                         "serving_size": label_data["serving_size"],
                         "calories": label_data["calories"],
                         "protein_g": label_data["protein_g"],
@@ -1050,7 +1240,8 @@ class TelegramBot:
                     }
                     save_products(learned)
                     parsed = {
-                        "description": f"{prod_name} ({label_data['serving_size']})",
+                        "found": True,
+                        "description": f"{clean_pname} ({label_data['serving_size']})",
                         "calories": label_data["calories"],
                         "protein_g": label_data["protein_g"],
                         "carbs_g": label_data["carbs_g"],
@@ -1062,6 +1253,24 @@ class TelegramBot:
             else:
                 meal_input = incoming_caption or "Plate photo"
                 parsed = parse_meal_text(meal_input)
+
+            if is_question:
+                self.send_message(chat_id, (
+                    f"🤔 *Coach Advice on '{parsed['description']}':*\n\n"
+                    f"• Calories: `{parsed['calories']} kcal`\n"
+                    f"• Protein: `{parsed['protein_g']}g`\n"
+                    f"• Carbs: `{parsed['carbs_g']}g` | Fats: `{parsed['fats_g']}g`\n\n"
+                    f"💡 Fits your Jain recomposition plan as long as cooking oil is minimal. If you actually eat this, text: *'I ate {parsed['description']}'* to log it!"
+                ))
+                return
+
+            if not parsed.get("found", True):
+                self.send_message(chat_id, (
+                    f"🤔 I didn't recognize specific foods in: *\"{incoming_caption}\"*\n\n"
+                    f"To log a meal, please mention what you had (e.g. *'150g low fat paneer, 2 rotis'*) or send a photo of your plate or nutrition label!\n\n"
+                    f"💡 *Tip:* Ask me any diet or workout question anytime."
+                ))
+                return
 
             habit_feedback = analyze_behavior_and_habits(incoming_caption or parsed["description"], parsed)
 
@@ -1106,6 +1315,7 @@ class TelegramBot:
     def run(self):
         print("=" * 60)
         print("🤖 19.GYM TELEGRAM COACH & CONTINUOUS LEARNING BOT IS RUNNING...")
+        print("🧠 Intent Classifier: ACTIVE (Pings & Questions never logged as food)")
         print("📸 Multi-Image Album Buffering: ACTIVE (Groups front/back product scans)")
         print("🔍 Nutrition Facts OCR Scanner: ACTIVE")
         print("🌐 Live Internet Food Search (OpenFoodFacts): ACTIVE")
@@ -1114,15 +1324,12 @@ class TelegramBot:
         print(f"📁 Workout Media: {WORKOUT_MEDIA_DIR}")
         print("=" * 60)
 
-        # 1. Proactive scheduler thread
         t_sched = threading.Thread(target=self.schedule_checker, daemon=True)
         t_sched.start()
 
-        # 2. Cloud Health Check Server
         t_http = threading.Thread(target=start_health_server, daemon=True)
         t_http.start()
 
-        # 3. Telegram polling loop
         while True:
             try:
                 url = f"{self.base_url}/getUpdates?offset={self.offset}&timeout=20"

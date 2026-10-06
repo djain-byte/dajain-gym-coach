@@ -1,0 +1,17 @@
+{
+  "2026-10-06": {
+    "date": "2026-10-06",
+    "weight_kg": null,
+    "steps": 0,
+    "water_l": 0.0,
+    "workout_done": "",
+    "workout_sets": [],
+    "meals": [],
+    "totals": {
+      "calories": 0,
+      "protein_g": 0.0,
+      "carbs_g": 0.0,
+      "fats_g": 0.0
+    }
+  }
+}
