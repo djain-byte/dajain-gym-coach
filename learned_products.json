@@ -25,5 +25,16 @@
     "carbs_g": 0.0,
     "fats_g": 0.0,
     "learned_from": "user_input"
+  },
+  "instaswad chia & berry energy bars": {
+    "name": "InstaSwad Chia & Berry Energy Bar",
+    "brand": "InstaSwad",
+    "serving_size": "25g (1 Bar)",
+    "calories": 108,
+    "protein_g": 2.6,
+    "carbs_g": 15.3,
+    "fats_g": 4.6,
+    "sugars_g": 8.6,
+    "learned_from": "label_scan"
   }
 }

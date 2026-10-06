@@ -269,8 +269,13 @@ def get_today_entry(logs):
 # ----------------- OCR & Continuous Learning Engine -----------------
 def run_ocr(image_path):
     try:
-        res = subprocess.run([TESSERACT_BIN, image_path, "stdout"], capture_output=True, text=True, timeout=10)
-        return res.stdout
+        res1 = subprocess.run([TESSERACT_BIN, image_path, "stdout"], capture_output=True, timeout=10)
+        txt1 = res1.stdout.decode('utf-8', errors='ignore') if isinstance(res1.stdout, bytes) else str(res1.stdout)
+        
+        res2 = subprocess.run([TESSERACT_BIN, image_path, "stdout", "--psm", "6"], capture_output=True, timeout=10)
+        txt2 = res2.stdout.decode('utf-8', errors='ignore') if isinstance(res2.stdout, bytes) else str(res2.stdout)
+        
+        return txt1 + "\n" + txt2
     except Exception as e:
         print(f"OCR Error: {e}")
         return ""
@@ -718,6 +723,7 @@ class TelegramBot:
         self.last_morning_date = None
         self.last_evening_date = None
         self.media_groups = {}
+        self.last_scanned = {}
         self.group_lock = threading.Lock()
 
     def send_message(self, chat_id, text, parse_mode="Markdown"):
@@ -821,6 +827,7 @@ class TelegramBot:
                 "learned_from": "front_back_label_scan"
             }
             save_products(learned)
+            self.last_scanned[chat_id] = {"data": learned[clean_pname.lower()], "time": time.time()}
 
             if caption and classify_intent(caption) == "QUESTION":
                 feedback = (
@@ -871,6 +878,27 @@ class TelegramBot:
             )
             self.send_message(chat_id, feedback)
         else:
+            combined_ocr = " ".join(ocr_texts).lower()
+            matched_learned = None
+            for pname, pdata in learned.items():
+                words = [w for w in pname.split() if len(w) > 3 and w not in ["energy", "bars", "standard"]]
+                if words and any(w in combined_ocr for w in words):
+                    matched_learned = pdata
+                    break
+
+            if matched_learned:
+                self.last_scanned[chat_id] = {"data": matched_learned, "time": time.time()}
+                feedback = (
+                    f"📸 *Product Identified from Photos:* **{matched_learned['name']}**\n\n"
+                    f"📋 *Nutrition Facts ({matched_learned.get('serving_size', '1 serving')}):*\n"
+                    f"• Calories: `{matched_learned['calories']} kcal`\n"
+                    f"• Protein: `{matched_learned['protein_g']}g`\n"
+                    f"• Carbs: `{matched_learned['carbs_g']}g` | Fats: `{matched_learned['fats_g']}g`\n\n"
+                    f"💡 *Coach Advisory:* Ask me *'Can I eat this?'* or text *'I ate {matched_learned['name']}'* to log it!"
+                )
+                self.send_message(chat_id, feedback)
+                return
+
             meal_input = caption or "Combined Meal Plates"
             parsed = parse_meal_text(meal_input)
             if caption and classify_intent(caption) == "QUESTION":
@@ -1117,14 +1145,55 @@ class TelegramBot:
                 return
 
             if intent == "QUESTION":
-                # Check if it's asking about a specific food
-                food_query = re.sub(r"(?:can i eat|is it good to eat|is|good\?|\?)", "", text, flags=re.I).strip()
-                if food_query and (any(k in food_query.lower() for k in NUTRITION_DB.keys()) or any(k in food_query.lower() for k in load_products().keys())):
-                    parsed = parse_meal_text(food_query)
-                    self.send_message(chat_id, f"🤔 *Coach Verdict on '{food_query}':*\n\n• Calories: `{parsed['calories']} kcal`\n• Protein: `{parsed['protein_g']}g`\n• Carbs: `{parsed['carbs_g']}g` | Fats: `{parsed['fats_g']}g`\n\n💡 Fits your Jain recomposition plan as long as cooking oil is minimal. If you actually eat this, text: *'I ate {food_query}'* to log it!")
+                recent = self.last_scanned.get(chat_id)
+                time_diff = time.time() - recent.get("time", 0) if recent else 9999
+
+                clean_q = re.sub(r"(?:can i eat|is it good to eat|is|good\?|\?|this|it)", "", text, flags=re.I).strip()
+                target_prod = None
+
+                if clean_q:
+                    for k, v in load_products().items():
+                        if k in clean_q.lower() or clean_q.lower() in k:
+                            target_prod = v
+                            break
+
+                # If asking "Can I eat this?" or "Can I eat it?" and recently uploaded an image
+                if not target_prod and recent and time_diff < 300:
+                    target_prod = recent.get("data")
+
+                if target_prod:
+                    p_name = target_prod.get("name", "Product")
+                    cal = target_prod.get("calories", 0)
+                    prot = target_prod.get("protein_g", 0)
+                    carbs = target_prod.get("carbs_g", 0)
+                    fats = target_prod.get("fats_g", 0)
+                    serv = target_prod.get("serving_size", "1 serving")
+
+                    if prot >= 15:
+                        verdict = "🔥 *GREAT RECOMP CHOICE!* High protein density. Fits your 145g target perfectly!"
+                    elif prot <= 5 and cal >= 100:
+                        prot_pct = (prot * 4 / cal) * 100 if cal else 0
+                        verdict = f"⚠️ *Low Protein Density:* Only `{prot}g protein` for `{cal} kcal` (~{prot_pct:.0f}% calories from protein). It will eat into your carb/fat allowance without helping your muscle building. Treat as an occasional energy snack, NOT a primary protein source."
+                    else:
+                        verdict = "💡 Moderate macros. Fits your 2,050 kcal Jain recomposition plan in moderation."
+
+                    self.send_message(chat_id, (
+                        f"🤔 *Coach Verdict on '{p_name}':*\n\n"
+                        f"📋 *Nutrition Facts ({serv}):*\n"
+                        f"• Calories: `{cal} kcal`\n"
+                        f"• Protein: `{prot}g`\n"
+                        f"• Carbs: `{carbs}g` | Fats: `{fats}g`\n\n"
+                        f"{verdict}\n\n"
+                        f"If you actually eat this, text: *'I ate {p_name}'* to log it!"
+                    ))
+                    return
+                elif clean_q and any(k in clean_q.lower() for k in NUTRITION_DB.keys()):
+                    parsed = parse_meal_text(clean_q)
+                    self.send_message(chat_id, f"🤔 *Coach Verdict on '{clean_q}':*\n\n• Calories: `{parsed['calories']} kcal`\n• Protein: `{parsed['protein_g']}g`\n• Carbs: `{parsed['carbs_g']}g` | Fats: `{parsed['fats_g']}g`\n\n💡 Fits your Jain recomposition plan. If you eat this, text: *'I ate {clean_q}'* to log it!")
+                    return
                 else:
                     self.send_message(chat_id, f"🤔 *Coach Advisory:*\n\nTo give you an exact verdict on whether it fits your 145g protein & 2,050 kcal plan:\n📸 Send a picture of the plate/packaging, or tell me the exact food name!")
-                return
+                    return
 
             if intent == "SEARCH":
                 query = re.sub(r"(?:search|calories in|macros of|nutrition of)", "", text, flags=re.I).strip()
