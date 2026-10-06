@@ -1,0 +1,24 @@
+{
+  "name": "Dajain",
+  "age_est": "24-28",
+  "height_cm": 173,
+  "height_ft": "5'8\"",
+  "current_weight_kg": 67.0,
+  "target_weight_kg": 68.0,
+  "current_estimated_body_fat_pct": 20.0,
+  "target_body_fat_pct": 9.5,
+  "dietary_preference": "Pure Vegetarian - Jain (No meat, no fish, no eggs, no root vegetables)",
+  "occupation": "Desk Job / Sedentary outside workout",
+  "current_supplements": [
+    "Optimum Nutrition Gold Standard 100% Whey (Double Rich Chocolate)",
+    "Wellcore Micronised Creatine Monohydrate"
+  ],
+  "targets": {
+    "daily_calories": 2050,
+    "protein_g": 145,
+    "carbohydrates_g": 210,
+    "fats_g": 52,
+    "water_liters": 3.5,
+    "daily_steps": 9000
+  }
+}

@@ -1,0 +1,8 @@
+.env
+token_crop.png
+__pycache__/
+*.pyc
+.DS_Store
+food_images/*.jpg
+workout_media/*.mp4
+workout_media/*.jpg

@@ -1,0 +1,66 @@
+{
+  "user_name": "Dajain",
+  "archetype": "Skinny-fat to Aesthetic Recomposition",
+  "streaks": {
+    "clean_diet_days": 1,
+    "workout_adherence_days": 1,
+    "water_target_days": 0,
+    "zero_sweets_days": 1
+  },
+  "behavioral_patterns": [
+    {
+      "id": "desk_job_sedentary",
+      "category": "lifestyle",
+      "pattern": "Eats lunch and dinner while sitting in desk chair during meetings; minimal movement outside gym.",
+      "coach_rule": "Remind to take 5-minute standing/walking breaks every 90 minutes and accumulate 9,000 daily steps.",
+      "status": "active_monitoring"
+    },
+    {
+      "id": "dry_fruit_calorie_bomb",
+      "category": "nutrition",
+      "pattern": "Historically drank/ate a 'glass of dry fruits' post-workout (500-800 uncounted calories).",
+      "coach_rule": "Strictly cap dry fruits to 10 almonds + 2 walnuts weighed (~120 kcal). Flag any unmeasured nut intake.",
+      "status": "rectified"
+    },
+    {
+      "id": "preworkout_heavy_fats",
+      "category": "nutrition",
+      "pattern": "Historically took peanut butter at 6:30 AM before 7:00 AM gym, delaying gastric emptying and dulling muscle pumps.",
+      "coach_rule": "Enforce Banana + Black Coffee + Salt water pre-workout. Keep peanut butter for evening/post-workout.",
+      "status": "rectified"
+    },
+    {
+      "id": "protein_underdosing_lunch",
+      "category": "nutrition",
+      "pattern": "Historically ate only 50g paneer at lunch (9g protein), falling 20g short per meal.",
+      "coach_rule": "Enforce 150g Low-Fat Paneer or 40g Soya Chunks at lunch to hit 30g+ protein.",
+      "status": "active_monitoring"
+    },
+    {
+      "id": "sweets_fast_food_cravings",
+      "category": "mindset",
+      "pattern": "Vulnerable to 'sweets sometimes' and 'homemade fast food' which spike visceral and love-handle fat.",
+      "coach_rule": "Zero refined sugar during the 12-week recomposition. Substitute cravings with chilled sweet protein dahi.",
+      "status": "active_monitoring"
+    },
+    {
+      "id": "post_workout_hygiene_bacne",
+      "category": "dermatology",
+      "pattern": "Sweat accumulation on upper back leading to pustular acne and clogged pores.",
+      "coach_rule": "Mandatory shower within 15 minutes of gym finish using 2% Salicylic Acid wash.",
+      "status": "active_monitoring"
+    }
+  ],
+  "timeline_learnings": [
+    {
+      "timestamp": "2026-10-06T11:00:00",
+      "type": "audit_baseline",
+      "learning": "Established baseline: 67kg, ~20% body fat, 145g protein target. Identified peanut butter pre-workout and dry fruit overload as primary blindspots."
+    },
+    {
+      "timestamp": "2026-10-06T11:18:45.823365",
+      "type": "slip_sugar",
+      "learning": "Sweet/sugar detected in meal: 'Lunch: 2 rotis and 1 gulab jamun sweet'. Reminded that sugar triggers love-handle fat storage."
+    }
+  ]
+}
