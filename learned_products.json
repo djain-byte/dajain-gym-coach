@@ -1,0 +1,29 @@
+{
+  "optimum nutrition gold standard 100% whey": {
+    "brand": "Optimum Nutrition",
+    "serving_size": "30.4g (1 scoop)",
+    "calories": 120,
+    "protein_g": 24.0,
+    "carbs_g": 3.0,
+    "fats_g": 1.5,
+    "learned_from": "user_input"
+  },
+  "pintola all natural peanut butter crunchy": {
+    "brand": "Pintola",
+    "serving_size": "32g (2 tbsp)",
+    "calories": 204.5,
+    "protein_g": 9.6,
+    "carbs_g": 5.8,
+    "fats_g": 15.7,
+    "learned_from": "label_scan"
+  },
+  "wellcore micronised creatine monohydrate": {
+    "brand": "Wellcore",
+    "serving_size": "5g (1 scoop)",
+    "calories": 0,
+    "protein_g": 0.0,
+    "carbs_g": 0.0,
+    "fats_g": 0.0,
+    "learned_from": "user_input"
+  }
+}

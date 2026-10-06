@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-19.GYM Telegram Coach Bot & Behavioral Learning Engine
-- Receives food photos, workout photos, and workout videos directly from your phone.
-- Saves food images to food_images/ and workout media to workout_media/.
-- Automatically distinguishes food vs workout sets and tracks progressive overload (weights, reps, PRs).
-- Smart Long-Term Memory & Habit Learning: Tracks slips, triggers, wins, and patterns in memory.json.
-- Proactive Daily 6:30 AM Workout Notification & 9:30 PM Evening Habit Reflection.
-- Built-in HTTP health server for 100% FREE 24/7 hosting on Render/Koyeb (Web Service).
-- Commands: /start, /status, /workout, /workout tomorrow, /prs, /habits, /reflect, /water, /steps, /weight.
+19.GYM Telegram Coach Bot & Continuous Learning Engine
+- Multi-Image Album Support (media_group_id buffering for front/back product scans and multi-plate meals).
+- Nutrition Label OCR Scanner (reads Protein, Carbs, Fats, Calories from package back labels).
+- Live Internet Food Search (OpenFoodFacts API integration) for continuous product learning.
+- Stores learned products permanently in learned_products.json.
+- Workout Media Intake & Progressive Overload PR Tracker.
+- Long-Term Behavioral Memory (memory.json) with slip detection and habit streaks.
+- 6:30 AM Workout Notification & 9:30 PM Evening Reflection.
+- Built-in HTTP server for 100% FREE Render Web Service deployment.
 """
 
 import os
@@ -16,6 +17,7 @@ import sys
 import time
 import json
 import threading
+import subprocess
 from datetime import datetime
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
@@ -27,11 +29,15 @@ PROFILE_PATH = os.path.join(BASE_DIR, "profile.json")
 LOGS_PATH = os.path.join(BASE_DIR, "daily_logs.json")
 PRS_PATH = os.path.join(BASE_DIR, "exercise_prs.json")
 MEMORY_PATH = os.path.join(BASE_DIR, "memory.json")
+PRODUCTS_PATH = os.path.join(BASE_DIR, "learned_products.json")
 ENV_PATH = os.path.join(BASE_DIR, ".env")
 
 os.makedirs(FOOD_IMAGES_DIR, exist_ok=True)
 os.makedirs(WORKOUT_MEDIA_DIR, exist_ok=True)
 
+TESSERACT_BIN = "/opt/homebrew/bin/tesseract" if os.path.exists("/opt/homebrew/bin/tesseract") else "tesseract"
+
+# ----------------- HTTP Health Server (For Free Render Hosting) -----------------
 class HealthCheckHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
@@ -40,7 +46,7 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.wfile.write(b"DJ Gym Coach Bot is LIVE and Healthy 24/7!\n")
 
     def log_message(self, format, *args):
-        pass  # Silence routine ping logs
+        pass
 
 def start_health_server():
     port = int(os.environ.get("PORT", 10000))
@@ -51,8 +57,9 @@ def start_health_server():
     except Exception as e:
         print(f"Health server note: {e}")
 
+# ----------------- Workout Schedule -----------------
 WORKOUT_SCHEDULE = {
-    0: {  # Monday
+    0: {
         "name": "Push Day A (Chest, Front/Side Delts, Triceps)",
         "icon": "💥",
         "focus": "Upper Chest Fullness & 3D Delts",
@@ -65,7 +72,7 @@ WORKOUT_SCHEDULE = {
             "6. Overhead Tricep Extension (DB/Cable): 3 sets x 10-12 reps"
         ]
     },
-    1: {  # Tuesday
+    1: {
         "name": "Pull Day A (Lats, Upper Back, Rear Delts, Biceps)",
         "icon": "🦅",
         "focus": "Wide V-Taper (Makes waist look tighter)",
@@ -78,7 +85,7 @@ WORKOUT_SCHEDULE = {
             "6. Hammer Curls (DB or Rope): 3 sets x 10-12 reps (Forearm/Arm thickness)"
         ]
     },
-    2: {  # Wednesday
+    2: {
         "name": "Legs & Core Day (Heavy Lower Body & Abs)",
         "icon": "🦵",
         "focus": "Quad Sweep, Posterior Chain & Deep Abdominal Bracing",
@@ -92,7 +99,7 @@ WORKOUT_SCHEDULE = {
             "7. Cable Woodchoppers or Ab Crunches: 3 sets x 15 reps"
         ]
     },
-    3: {  # Thursday
+    3: {
         "name": "Active Recovery & Mobility Day (REST)",
         "icon": "🧘",
         "focus": "CNS Restoration, Muscle Repair & NEAT Steps",
@@ -103,7 +110,7 @@ WORKOUT_SCHEDULE = {
             "Note: Muscles grow during rest! Do not lift today."
         ]
     },
-    4: {  # Friday
+    4: {
         "name": "Upper Body Hypertrophy (Chest, Back, Shoulders, Arms)",
         "icon": "⚔️",
         "focus": "Overall Upper Body Density & Arm Thickness",
@@ -116,7 +123,7 @@ WORKOUT_SCHEDULE = {
             "6. Dips (Assisted/BW) or Skull Crushers: 3 sets x 10-12 reps"
         ]
     },
-    5: {  # Saturday
+    5: {
         "name": "Lower Body & Abs + LISS Cardio",
         "icon": "🔥",
         "focus": "Leg Hypertrophy, Core & Fat Oxidation",
@@ -130,7 +137,7 @@ WORKOUT_SCHEDULE = {
             "7. Cardio: 15 mins Incline Treadmill Walk (10-12% incline, speed 4.0-4.5 km/h)"
         ]
     },
-    6: {  # Sunday
+    6: {
         "name": "Complete Rest Day",
         "icon": "💤",
         "focus": "Full Rejuvenation & Weekly Reset",
@@ -142,6 +149,7 @@ WORKOUT_SCHEDULE = {
     }
 }
 
+# ----------------- Persistence Helpers -----------------
 def load_env():
     env = {}
     if os.path.exists(ENV_PATH):
@@ -151,7 +159,6 @@ def load_env():
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
                     env[k.strip()] = v.strip().strip("'\"")
-    # Also check system environment variables (for cloud deployment)
     for k in ["TELEGRAM_BOT_TOKEN", "PORT"]:
         if k in os.environ:
             env[k] = os.environ[k]
@@ -220,6 +227,19 @@ def save_memory(mem):
     with open(MEMORY_PATH, "w") as f:
         json.dump(mem, f, indent=2)
 
+def load_products():
+    if os.path.exists(PRODUCTS_PATH):
+        with open(PRODUCTS_PATH, "r") as f:
+            try:
+                return json.load(f)
+            except Exception:
+                return {}
+    return {}
+
+def save_products(prods):
+    with open(PRODUCTS_PATH, "w") as f:
+        json.dump(prods, f, indent=2)
+
 def get_today_entry(logs):
     today = datetime.now().strftime("%Y-%m-%d")
     if today not in logs:
@@ -242,6 +262,80 @@ def get_today_entry(logs):
         logs[today]["workout_sets"] = []
     return logs[today], today
 
+# ----------------- OCR & Continuous Learning Engine -----------------
+def run_ocr(image_path):
+    """Extracts text from image using tesseract"""
+    try:
+        res = subprocess.run([TESSERACT_BIN, image_path, "stdout"], capture_output=True, text=True, timeout=10)
+        return res.stdout
+    except Exception as e:
+        print(f"OCR Error: {e}")
+        return ""
+
+def parse_nutrition_label(ocr_text):
+    """Detects and parses nutrition facts from back label OCR"""
+    text = ocr_text.lower()
+    is_nutrition_label = any(k in text for k in ["nutritional information", "nutrition facts", "per 100g", "per serve", "energy (kcal)", "protein (g)"])
+    if not is_nutrition_label:
+        return None
+
+    data = {"calories": 0, "protein_g": 0.0, "carbs_g": 0.0, "fats_g": 0.0, "serving_size": "1 serving"}
+
+    # Extract Protein
+    p_match = re.search(r"protein\s*(?:\(g\))?[\s:]*(\d+(?:\.\d+)?)", text)
+    if p_match:
+        data["protein_g"] = float(p_match.group(1))
+
+    # Extract Energy / Calories
+    cal_match = re.search(r"(?:energy|calories)\s*(?:\(kcal\))?[\s:]*(\d+(?:\.\d+)?)", text)
+    if cal_match:
+        data["calories"] = round(float(cal_match.group(1)))
+
+    # Extract Fat
+    f_match = re.search(r"(?:total fat|fat)\s*(?:\(g\))?[\s:]*(\d+(?:\.\d+)?)", text)
+    if f_match:
+        data["fats_g"] = float(f_match.group(1))
+
+    # Extract Carbs
+    c_match = re.search(r"(?:total carbohydrates|carbohydrates|carbs)\s*(?:\(g\))?[\s:]*(\d+(?:\.\d+)?)", text)
+    if c_match:
+        data["carbs_g"] = float(c_match.group(1))
+
+    # Extract serving size
+    serve_match = re.search(r"per\s*(\d+\s*(?:g|ml|scoop))", text)
+    if serve_match:
+        data["serving_size"] = serve_match.group(1)
+
+    return data
+
+def search_openfoodfacts(query):
+    """Live internet search for food products and macros"""
+    url = f"https://world.openfoodfacts.org/cgi/search.pl?search_terms={query}&search_simple=1&action=process&json=1"
+    try:
+        r = requests.get(url, headers={"User-Agent": "DJGymCoachBot/2.0"}, timeout=6).json()
+        products = r.get("products", [])
+        if products:
+            p = products[0]
+            nutr = p.get("nutriments", {})
+            cal = nutr.get("energy-kcal_100g", nutr.get("energy-kcal_serving", 0))
+            prot = nutr.get("proteins_100g", nutr.get("proteins_serving", 0))
+            carbs = nutr.get("carbohydrates_100g", nutr.get("carbohydrates_serving", 0))
+            fat = nutr.get("fat_100g", nutr.get("fat_serving", 0))
+
+            return {
+                "name": p.get("product_name", query),
+                "brand": p.get("brands", "Verified Brand"),
+                "serving_size": p.get("serving_size", "100g"),
+                "calories": round(float(cal)),
+                "protein_g": round(float(prot), 1),
+                "carbs_g": round(float(carbs), 1),
+                "fats_g": round(float(fat), 1)
+            }
+    except Exception as e:
+        print(f"Internet search error: {e}")
+    return None
+
+# ----------------- Macro Parsing -----------------
 NUTRITION_DB = {
     "low fat paneer": {"unit": "100g", "cal": 150, "p": 25.0, "c": 3.0, "f": 4.0},
     "paneer": {"unit": "100g", "cal": 265, "p": 18.0, "c": 3.5, "f": 20.8},
@@ -270,6 +364,18 @@ def parse_meal_text(text):
     total_f = 0.0
     found_items = []
 
+    # Check in learned_products.json first!
+    learned = load_products()
+    for prod_name, pdata in learned.items():
+        if prod_name in text_lower or (pdata.get("brand", "").lower() in text_lower and any(w in text_lower for w in prod_name.split())):
+            total_cal += pdata["calories"]
+            total_p += pdata["protein_g"]
+            total_c += pdata["carbs_g"]
+            total_f += pdata["fats_g"]
+            found_items.append(f"{prod_name.title()} ({pdata.get('serving_size', '1 serving')})")
+            break
+
+    # Check for paneer
     paneer_match = re.search(r"(\d+)\s*(?:g|gms|gram|grams)?\s*(low\s*fat\s*paneer|paneer)", text_lower)
     if paneer_match:
         qty = float(paneer_match.group(1))
@@ -289,7 +395,7 @@ def parse_meal_text(text):
         total_c += item["c"] * 1.5
         total_f += item["f"] * 1.5
         found_items.append("150g Low Fat Paneer")
-    elif "paneer" in text_lower:
+    elif "paneer" in text_lower and not any("paneer" in f.lower() for f in found_items):
         item = NUTRITION_DB["paneer"]
         total_cal += item["cal"]
         total_p += item["p"]
@@ -297,6 +403,7 @@ def parse_meal_text(text):
         total_f += item["f"]
         found_items.append("100g Paneer")
 
+    # Check for rotis
     roti_match = re.search(r"(\d+)\s*(?:roti|rotis|phulka|phulkas|chapati|chapatis)", text_lower)
     if roti_match:
         count = float(roti_match.group(1))
@@ -338,7 +445,7 @@ def parse_meal_text(text):
         total_f += item["f"]
         found_items.append("Salad")
 
-    if any(w in text_lower for w in ["whey", "protein shake", "gold standard"]):
+    if any(w in text_lower for w in ["whey", "protein shake", "gold standard"]) and not any("whey" in f.lower() for f in found_items):
         item = NUTRITION_DB["whey"]
         total_cal += item["cal"]
         total_p += item["p"]
@@ -346,20 +453,24 @@ def parse_meal_text(text):
         total_f += item["f"]
         found_items.append("1 Scoop Whey Protein")
 
-    if "banana" in text_lower:
-        item = NUTRITION_DB["banana"]
-        total_cal += item["cal"]
-        total_p += item["p"]
-        total_c += item["c"]
-        total_f += item["f"]
-        found_items.append("1 Banana")
-
     if not found_items:
-        total_cal = 450
-        total_p = 25.0
-        total_c = 50.0
-        total_f = 12.0
-        found_items.append(text[:30])
+        # Check internet search
+        online = search_openfoodfacts(text)
+        if online:
+            total_cal = online["calories"]
+            total_p = online["protein_g"]
+            total_c = online["carbs_g"]
+            total_f = online["fats_g"]
+            found_items.append(f"{online['name']} ({online.get('serving_size', '100g')})")
+            # Save into memory
+            learned[online["name"].lower()] = online
+            save_products(learned)
+        else:
+            total_cal = 450
+            total_p = 25.0
+            total_c = 50.0
+            total_f = 12.0
+            found_items.append(text[:30])
 
     return {
         "description": ", ".join(found_items),
@@ -490,6 +601,7 @@ def format_evening_review(entry, targets, mem):
     )
     return review_msg
 
+# ----------------- Telegram Bot Class with Media Group Buffering -----------------
 class TelegramBot:
     def __init__(self, token):
         self.token = token
@@ -497,6 +609,8 @@ class TelegramBot:
         self.offset = 0
         self.last_morning_date = None
         self.last_evening_date = None
+        self.media_groups = {}  # group_id -> {"timer": ..., "messages": [...]}
+        self.group_lock = threading.Lock()
 
     def send_message(self, chat_id, text, parse_mode="Markdown"):
         url = f"{self.base_url}/sendMessage"
@@ -525,7 +639,6 @@ class TelegramBot:
         return False
 
     def schedule_checker(self):
-        """Proactive background thread checking for 6:30 AM workout & 9:30 PM reflection"""
         print("⏰ Proactive scheduler thread active (6:30 AM & 9:30 PM)...")
         while True:
             try:
@@ -534,28 +647,148 @@ class TelegramBot:
                 profile = load_profile()
                 chat_id = profile.get("telegram_chat_id")
 
-                # 6:30 AM Workout Broadcast
                 if now.hour == 6 and now.minute in [30, 31]:
                     if self.last_morning_date != today_str and chat_id:
                         msg = format_workout_message(day_offset=0)
-                        print(f"[{now.strftime('%H:%M:%S')}] Sending 6:30 AM workout to chat_id: {chat_id}")
                         self.send_message(chat_id, msg)
                         self.last_morning_date = today_str
 
-                # 9:30 PM Evening Habit Review Broadcast
                 if now.hour == 21 and now.minute in [30, 31]:
                     if self.last_evening_date != today_str and chat_id:
                         logs = load_logs()
                         entry, _ = get_today_entry(logs)
                         mem = load_memory()
                         msg = format_evening_review(entry, profile["targets"], mem)
-                        print(f"[{now.strftime('%H:%M:%S')}] Sending 9:30 PM habit review to chat_id: {chat_id}")
                         self.send_message(chat_id, msg)
                         self.last_evening_date = today_str
-
             except Exception as e:
                 print(f"Error in scheduler: {e}")
             time.sleep(30)
+
+    def process_media_group(self, group_id):
+        """Processes buffered multi-image albums (front + back product scan)"""
+        with self.group_lock:
+            group_data = self.media_groups.pop(group_id, None)
+        if not group_data:
+            return
+
+        messages = group_data["messages"]
+        chat_id = messages[0]["chat"]["id"]
+        caption = next((m.get("caption") for m in messages if m.get("caption")), "")
+
+        print(f"📦 Processing Multi-Image Album ({len(messages)} photos) for chat {chat_id}...")
+
+        downloaded_paths = []
+        for i, m in enumerate(messages):
+            photos = m.get("photo", [])
+            if photos:
+                best = photos[-1]
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                dest = os.path.join(FOOD_IMAGES_DIR, f"album_{group_id}_{i}_{timestamp}.jpg")
+                if self.download_file(best["file_id"], dest):
+                    downloaded_paths.append(dest)
+
+        # Run OCR on all images to detect nutrition label and product details
+        ocr_texts = [run_ocr(p) for p in downloaded_paths]
+        nutrition_found = None
+        for txt in ocr_texts:
+            parsed_label = parse_nutrition_label(txt)
+            if parsed_label and parsed_label.get("protein_g", 0) > 0:
+                nutrition_found = parsed_label
+                break
+
+        profile = load_profile()
+        targets = profile["targets"]
+        logs = load_logs()
+        entry, today = get_today_entry(logs)
+        learned = load_products()
+
+        if nutrition_found:
+            # Successfully read nutrition label!
+            product_name = caption if caption else "Scanned Protein/Fitness Product"
+            learned[product_name.lower()] = {
+                "name": product_name,
+                "serving_size": nutrition_found["serving_size"],
+                "calories": nutrition_found["calories"],
+                "protein_g": nutrition_found["protein_g"],
+                "carbs_g": nutrition_found["carbs_g"],
+                "fats_g": nutrition_found["fats_g"],
+                "learned_from": "front_back_label_scan"
+            }
+            save_products(learned)
+
+            # Log 1 single serving!
+            entry["meals"].append({
+                "time": datetime.now().strftime("%H:%M"),
+                "name": f"{product_name} ({nutrition_found['serving_size']})",
+                "image": os.path.basename(downloaded_paths[0]) if downloaded_paths else None,
+                "calories": nutrition_found["calories"],
+                "protein_g": nutrition_found["protein_g"],
+                "carbs_g": nutrition_found["carbs_g"],
+                "fats_g": nutrition_found["fats_g"]
+            })
+
+            entry["totals"]["calories"] = sum(m["calories"] for m in entry["meals"])
+            entry["totals"]["protein_g"] = round(sum(m["protein_g"] for m in entry["meals"]), 1)
+            entry["totals"]["carbs_g"] = round(sum(m["carbs_g"] for m in entry["meals"]), 1)
+            entry["totals"]["fats_g"] = round(sum(m["fats_g"] for m in entry["meals"]), 1)
+            save_logs(logs)
+
+            tot = entry["totals"]
+            rem_p = max(0, targets["protein_g"] - tot["protein_g"])
+            rem_cal = max(0, targets["daily_calories"] - tot["calories"])
+
+            feedback = (
+                f"🧠 *New Product Learned & Logged as 1 Item!* (📸 {len(downloaded_paths)} Photos Analyzed)\n\n"
+                f"📦 *Product:* {product_name}\n"
+                f"📋 *Extracted Label Facts ({nutrition_found['serving_size']}):*\n"
+                f"• Calories: `{nutrition_found['calories']} kcal`\n"
+                f"• Protein: `{nutrition_found['protein_g']}g`\n"
+                f"• Carbs: `{nutrition_found['carbs_g']}g`\n"
+                f"• Fats: `{nutrition_found['fats_g']}g`\n\n"
+                f"✅ *Saved to permanent memory!* I will recognize this product automatically in the future.\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📊 *Today's Total ({today}):*\n"
+                f"• Calories: `{tot['calories']} / {targets['daily_calories']} kcal` (Left: `{rem_cal} kcal`)\n"
+                f"• Protein: `{tot['protein_g']}g / {targets['protein_g']}g` (Left: `{rem_p:.1f}g`)"
+            )
+            self.send_message(chat_id, feedback)
+        else:
+            # Multi-dish meal photos (e.g. plate + salad + bowl)
+            meal_input = caption or "Combined Meal Plates"
+            parsed = parse_meal_text(meal_input)
+            entry["meals"].append({
+                "time": datetime.now().strftime("%H:%M"),
+                "name": parsed["description"],
+                "image": os.path.basename(downloaded_paths[0]) if downloaded_paths else None,
+                "calories": parsed["calories"],
+                "protein_g": parsed["protein_g"],
+                "carbs_g": parsed["carbs_g"],
+                "fats_g": parsed["fats_g"]
+            })
+            entry["totals"]["calories"] = sum(m["calories"] for m in entry["meals"])
+            entry["totals"]["protein_g"] = round(sum(m["protein_g"] for m in entry["meals"]), 1)
+            entry["totals"]["carbs_g"] = round(sum(m["carbs_g"] for m in entry["meals"]), 1)
+            entry["totals"]["fats_g"] = round(sum(m["fats_g"] for m in entry["meals"]), 1)
+            save_logs(logs)
+
+            tot = entry["totals"]
+            rem_p = max(0, targets["protein_g"] - tot["protein_g"])
+            rem_cal = max(0, targets["daily_calories"] - tot["calories"])
+
+            feedback = (
+                f"✅ *Multi-Photo Meal Logged as 1 Combined Item!* (📸 {len(downloaded_paths)} Photos)\n\n"
+                f"🍽 *Items:* {parsed['description']}\n"
+                f"🔥 *Calories:* `{parsed['calories']} kcal`\n"
+                f"💪 *Protein:* `{parsed['protein_g']}g`\n"
+                f"🍞 *Carbs:* `{parsed['carbs_g']}g`\n"
+                f"🥑 *Fats:* `{parsed['fats_g']}g`\n\n"
+                f"━━━━━━━━━━━━━━━━━━\n"
+                f"📊 *Today's Total ({today}):*\n"
+                f"• Calories: `{tot['calories']} / {targets['daily_calories']} kcal` (Left: `{rem_cal} kcal`)\n"
+                f"• Protein: `{tot['protein_g']}g / {targets['protein_g']}g` (Left: `{rem_p:.1f}g`)"
+            )
+            self.send_message(chat_id, feedback)
 
     def handle_update(self, update):
         message = update.get("message")
@@ -567,6 +800,20 @@ class TelegramBot:
         caption = message.get("caption", "")
         photos = message.get("photo")
         video = message.get("video") or message.get("video_note")
+        media_group_id = message.get("media_group_id")
+
+        # 1. Handle Multi-Image Album / Media Group Buffering
+        if media_group_id and photos:
+            with self.group_lock:
+                if media_group_id not in self.media_groups:
+                    self.media_groups[media_group_id] = {
+                        "messages": [message],
+                        "timer": threading.Timer(1.5, self.process_media_group, args=[media_group_id])
+                    }
+                    self.media_groups[media_group_id]["timer"].start()
+                else:
+                    self.media_groups[media_group_id]["messages"].append(message)
+            return
 
         profile = load_profile()
         if profile.get("telegram_chat_id") != chat_id:
@@ -582,17 +829,18 @@ class TelegramBot:
         # Commands
         if text.startswith("/start"):
             welcome = (
-                f"🔥 *Namaste Dajain! Your 19.GYM AI Coach & Learning Engine is ONLINE* 🔥\n\n"
-                f"I continuously learn your personal habits, call out old mistakes before they happen, and engineer you into the aesthetic physique in Image 4.\n\n"
+                f"🔥 *Namaste Darshan! Your 19.GYM AI Coach & Learning Engine is ONLINE* 🔥\n\n"
+                f"I continuously learn your personal habits, scan product labels, research new foods online, and engineer you into the aesthetic physique in Image 4.\n\n"
                 f"🧠 *Smart Features Active:*\n"
+                f"• Multi-Image Support: Send front & back of protein powders or multiple plates together!\n"
+                f"• Nutrition Facts Label Scanner (OCR)\n"
+                f"• Live Internet Food Search\n"
                 f"• Continuous Behavioral Memory (`memory.json`)\n"
-                f"• Food Macro Analysis & Photo Vault\n"
                 f"• Exercise Video & Progressive Overload Tracking\n"
-                f"• 6:30 AM Morning Workout Protocol\n"
-                f"• 9:30 PM Evening Habit Reflection\n\n"
+                f"• 6:30 AM Workout Notification & 9:30 PM Reflection\n\n"
                 f"Commands:\n"
-                f"• `/habits` - View what I've learned about your habits & streaks\n"
-                f"• `/reflect` - Run an on-demand habit audit right now\n"
+                f"• `/products` - View all products I have learned so far\n"
+                f"• `/habits` - View your behavioral streaks and learnings\n"
                 f"• `/prs` - View your personal best weights across all lifts\n"
                 f"• `/workout` - Today's complete routine\n"
                 f"• `/status` - Today's full macros, calories & logged sets\n"
@@ -601,12 +849,21 @@ class TelegramBot:
             self.send_message(chat_id, welcome)
             return
 
+        if text.startswith("/products"):
+            learned = load_products()
+            if not learned:
+                self.send_message(chat_id, "📦 No custom products learned yet. Send front and back photos of any food item to teach me!")
+            else:
+                lines = [f"• *{p.title()}:* `{d['protein_g']}g P` | `{d['calories']} kcal` ({d.get('serving_size', '1 serving')})" for p, d in learned.items()]
+                self.send_message(chat_id, "🧠 *Learned Product Knowledge Base:*\n\n" + "\n".join(lines))
+            return
+
         if text.startswith("/habits") or text.startswith("/memory"):
             patterns = mem.get("behavioral_patterns", [])
             pattern_lines = [f"• *{p['id'].replace('_', ' ').title()}:* {p['coach_rule']}" for p in patterns[:5]]
             streaks = mem.get("streaks", {})
             h_msg = (
-                f"🧠 *AI Coach Long-Term Memory for Dajain*\n\n"
+                f"🧠 *AI Coach Long-Term Memory for Darshan*\n\n"
                 f"🔥 *Current Streaks:*\n"
                 f"• Clean Diet: `{streaks.get('clean_diet_days', 1)} days`\n"
                 f"• Zero Sugar/Sweets: `{streaks.get('zero_sweets_days', 1)} days`\n"
@@ -764,7 +1021,7 @@ class TelegramBot:
             self.send_message(chat_id, reply_msg)
             return
 
-        # 2. FOOD MEAL LOGGING & HABIT CRITIQUE
+        # 2. FOOD MEAL LOGGING & HABIT CRITIQUE (Single Photo or Text)
         saved_img_path = None
         if photos:
             best_photo = photos[-1]
@@ -775,10 +1032,38 @@ class TelegramBot:
                 saved_img_path = dest
 
         if incoming_caption or photos:
-            meal_input = incoming_caption or "Plate photo"
-            parsed = parse_meal_text(meal_input)
+            # Check if this single photo is a nutrition facts label
+            if saved_img_path:
+                ocr_text = run_ocr(saved_img_path)
+                label_data = parse_nutrition_label(ocr_text)
+                if label_data and label_data.get("protein_g", 0) > 0:
+                    prod_name = incoming_caption or "Product Label"
+                    learned = load_products()
+                    learned[prod_name.lower()] = {
+                        "name": prod_name,
+                        "serving_size": label_data["serving_size"],
+                        "calories": label_data["calories"],
+                        "protein_g": label_data["protein_g"],
+                        "carbs_g": label_data["carbs_g"],
+                        "fats_g": label_data["fats_g"],
+                        "learned_from": "label_scan"
+                    }
+                    save_products(learned)
+                    parsed = {
+                        "description": f"{prod_name} ({label_data['serving_size']})",
+                        "calories": label_data["calories"],
+                        "protein_g": label_data["protein_g"],
+                        "carbs_g": label_data["carbs_g"],
+                        "fats_g": label_data["fats_g"]
+                    }
+                else:
+                    meal_input = incoming_caption or "Plate photo"
+                    parsed = parse_meal_text(meal_input)
+            else:
+                meal_input = incoming_caption or "Plate photo"
+                parsed = parse_meal_text(meal_input)
 
-            habit_feedback = analyze_behavior_and_habits(meal_input, parsed)
+            habit_feedback = analyze_behavior_and_habits(incoming_caption or parsed["description"], parsed)
 
             entry["meals"].append({
                 "time": datetime.now().strftime("%H:%M"),
@@ -820,22 +1105,24 @@ class TelegramBot:
 
     def run(self):
         print("=" * 60)
-        print("🤖 19.GYM TELEGRAM COACH & LEARNING BOT IS RUNNING...")
+        print("🤖 19.GYM TELEGRAM COACH & CONTINUOUS LEARNING BOT IS RUNNING...")
+        print("📸 Multi-Image Album Buffering: ACTIVE (Groups front/back product scans)")
+        print("🔍 Nutrition Facts OCR Scanner: ACTIVE")
+        print("🌐 Live Internet Food Search (OpenFoodFacts): ACTIVE")
         print("⏰ Proactive Notifications: 6:30 AM (Workout) & 9:30 PM (Habit Reflection)")
-        print(f"🧠 Long-Term Memory: {MEMORY_PATH}")
         print(f"📁 Meal Photos: {FOOD_IMAGES_DIR}")
         print(f"📁 Workout Media: {WORKOUT_MEDIA_DIR}")
         print("=" * 60)
 
-        # 1. Start 6:30 AM & 9:30 PM proactive scheduler
+        # 1. Proactive scheduler thread
         t_sched = threading.Thread(target=self.schedule_checker, daemon=True)
         t_sched.start()
 
-        # 2. Start HTTP Health check server for Cloud Hosting
+        # 2. Cloud Health Check Server
         t_http = threading.Thread(target=start_health_server, daemon=True)
         t_http.start()
 
-        # 3. Main Telegram polling loop
+        # 3. Telegram polling loop
         while True:
             try:
                 url = f"{self.base_url}/getUpdates?offset={self.offset}&timeout=20"
@@ -855,9 +1142,7 @@ def main():
     token = env.get("TELEGRAM_BOT_TOKEN")
 
     if not token:
-        print("\n" + "!" * 60)
-        print("⚠️  TELEGRAM_BOT_TOKEN IS MISSING in .env or environment!")
-        print("!" * 60)
+        print("\n⚠️  TELEGRAM_BOT_TOKEN IS MISSING in .env or environment!")
         sys.exit(1)
 
     bot = TelegramBot(token)
