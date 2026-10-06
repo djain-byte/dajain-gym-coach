@@ -6,6 +6,7 @@
 - Automatically distinguishes food vs workout sets and tracks progressive overload (weights, reps, PRs).
 - Smart Long-Term Memory & Habit Learning: Tracks slips, triggers, wins, and patterns in memory.json.
 - Proactive Daily 6:30 AM Workout Notification & 9:30 PM Evening Habit Reflection.
+- Built-in HTTP health server for 100% FREE 24/7 hosting on Render/Koyeb (Web Service).
 - Commands: /start, /status, /workout, /workout tomorrow, /prs, /habits, /reflect, /water, /steps, /weight.
 """
 
@@ -16,6 +17,7 @@ import time
 import json
 import threading
 from datetime import datetime
+from http.server import HTTPServer, BaseHTTPRequestHandler
 import requests
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -29,6 +31,25 @@ ENV_PATH = os.path.join(BASE_DIR, ".env")
 
 os.makedirs(FOOD_IMAGES_DIR, exist_ok=True)
 os.makedirs(WORKOUT_MEDIA_DIR, exist_ok=True)
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(b"DJ Gym Coach Bot is LIVE and Healthy 24/7!\n")
+
+    def log_message(self, format, *args):
+        pass  # Silence routine ping logs
+
+def start_health_server():
+    port = int(os.environ.get("PORT", 10000))
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        print(f"🌐 Cloud Health Check Server running on port {port}")
+        server.serve_forever()
+    except Exception as e:
+        print(f"Health server note: {e}")
 
 WORKOUT_SCHEDULE = {
     0: {  # Monday
@@ -130,6 +151,10 @@ def load_env():
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
                     env[k.strip()] = v.strip().strip("'\"")
+    # Also check system environment variables (for cloud deployment)
+    for k in ["TELEGRAM_BOT_TOKEN", "PORT"]:
+        if k in os.environ:
+            env[k] = os.environ[k]
     return env
 
 def load_profile():
@@ -345,12 +370,10 @@ def parse_meal_text(text):
     }
 
 def analyze_behavior_and_habits(text, meal_data=None):
-    """Behavioral Learning & Pattern Recognition Engine"""
     text_lower = text.lower()
     mem = load_memory()
     feedback_notes = []
 
-    # 1. Sweet / Refined Sugar Slip Detection
     sweet_words = ["sweet", "mithai", "chocolate", "ice cream", "sugar", "gulab jamun", "halwa", "pastry", "cake"]
     found_sweet = any(w in text_lower for w in sweet_words)
     if found_sweet:
@@ -364,11 +387,9 @@ def analyze_behavior_and_habits(text, meal_data=None):
     else:
         mem["streaks"]["zero_sweets_days"] = mem["streaks"].get("zero_sweets_days", 0) + 1
 
-    # 2. Pre-workout timing check with Peanut Butter
     if "peanut butter" in text_lower and datetime.now().hour < 9:
         feedback_notes.append("⚠️ *Memory Reminder:* You ate Peanut Butter in the morning window. Remember our rule: PB is 70% fat and blunts your gym pumps. Move it to 4:30 PM snack!")
 
-    # 3. High Protein Praise
     if meal_data and meal_data.get("protein_g", 0) >= 30:
         feedback_notes.append("🎯 *Coach Win:* 30g+ high-protein meal logged! Excellent execution on breaking your old habit of underdosing protein.")
 
@@ -757,7 +778,6 @@ class TelegramBot:
             meal_input = incoming_caption or "Plate photo"
             parsed = parse_meal_text(meal_input)
 
-            # Run behavioral habit learning engine
             habit_feedback = analyze_behavior_and_habits(meal_input, parsed)
 
             entry["meals"].append({
@@ -807,9 +827,15 @@ class TelegramBot:
         print(f"📁 Workout Media: {WORKOUT_MEDIA_DIR}")
         print("=" * 60)
 
-        t = threading.Thread(target=self.schedule_checker, daemon=True)
-        t.start()
+        # 1. Start 6:30 AM & 9:30 PM proactive scheduler
+        t_sched = threading.Thread(target=self.schedule_checker, daemon=True)
+        t_sched.start()
 
+        # 2. Start HTTP Health check server for Cloud Hosting
+        t_http = threading.Thread(target=start_health_server, daemon=True)
+        t_http.start()
+
+        # 3. Main Telegram polling loop
         while True:
             try:
                 url = f"{self.base_url}/getUpdates?offset={self.offset}&timeout=20"
@@ -830,7 +856,7 @@ def main():
 
     if not token:
         print("\n" + "!" * 60)
-        print("⚠️  TELEGRAM_BOT_TOKEN IS MISSING in .env!")
+        print("⚠️  TELEGRAM_BOT_TOKEN IS MISSING in .env or environment!")
         print("!" * 60)
         sys.exit(1)
 
